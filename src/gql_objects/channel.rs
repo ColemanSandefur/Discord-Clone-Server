@@ -1,5 +1,8 @@
 use crate::Context;
 use crate::Message;
+use chrono::DateTime;
+use chrono::NaiveDateTime;
+use chrono::Utc;
 use mysql::prelude::*;
 use uuid::Uuid;
 
@@ -26,10 +29,12 @@ impl Channel {
             .unwrap();
 
         tsx.exec_map(
-            "SELECT id, message, user_id, channel_id FROM messages WHERE messages.channel_id=? ORDER BY timestamp",
+            "SELECT id, message, user_id, channel_id, timestamp FROM messages WHERE messages.channel_id=? ORDER BY timestamp",
             (&self.id,),
-            |(id, message, user_id, channel_id): (Uuid, String, Uuid, Uuid)| {
-                return Message::new(id, message, user_id, channel_id);
+            |(id, message, user_id, channel_id, timestamp): (Uuid, String, Uuid, Uuid, NaiveDateTime)| {
+                let timestamp = DateTime::<Utc>::from_utc(timestamp, Utc);
+                println!("{}", timestamp);
+                return Message::new(id, message, user_id, channel_id, timestamp);
             },
         )
         .unwrap()

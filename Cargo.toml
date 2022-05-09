@@ -6,9 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-juniper = "0.15.9"
+juniper = {version="0.15.9", features=["chrono"]}
 juniper_rocket = "0.8.1"
 rocket = "0.5.0-rc.1"
 mysql = "22.1.0"
+mysql_common = {version="0.28.2", features=["chrono"]}
 bcrypt = "0.13"
 uuid = {version="0.8", features=["v4"]}
+chrono = "0.4"
