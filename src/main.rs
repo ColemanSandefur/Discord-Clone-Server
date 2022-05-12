@@ -1,5 +1,6 @@
 #[macro_use]
 extern crate juniper;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use juniper::{EmptySubscription, FieldResult};
 use mysql::prelude::*;
 use mysql::{OptsBuilder, Pool};
@@ -67,6 +68,37 @@ impl Query {
                 (token, channel_id),
                 |(id_channel, name): (String, String)| {
                     return Channel::new(Uuid::parse_str(&id_channel).unwrap(), name);
+                },
+            )
+            .unwrap();
+
+        if result.len() > 0 {
+            Some(result.remove(0))
+        } else {
+            None
+        }
+    }
+
+    fn get_message(context: &Context, token: Uuid, message_id: Uuid) -> Option<Message> {
+        let mut tsx = context
+            .get_conn()
+            .start_transaction(Default::default())
+            .unwrap();
+
+        let mut result: Vec<Message> = tsx
+            .exec_map(
+                "call discord_clone.get_single_message(?, ?);",
+                (token, message_id),
+                |(id, message, user_id, channel_id, timestamp): (
+                    Uuid,
+                    String,
+                    Uuid,
+                    Uuid,
+                    NaiveDateTime,
+                )| {
+                    let timestamp = DateTime::<Utc>::from_utc(timestamp, Utc);
+                    println!("{}", timestamp);
+                    return Message::new(id, message, user_id, channel_id, timestamp);
                 },
             )
             .unwrap();
@@ -225,9 +257,7 @@ async fn main() {
             rocket::routes![graphiql, get_graphql_handler, post_graphql_handler],
         )
         // a quick workaround for cors while developing the server
-        .mount(
-            "/", FileServer::from("../discord-client/build")
-        )
+        .mount("/", FileServer::from("../discord-client/build"))
         .launch()
         .await
         .expect("server to launch");
