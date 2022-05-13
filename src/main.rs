@@ -243,6 +243,13 @@ use rocket::fs::FileServer;
 async fn main() {
     let connection = Pool::new(get_opts()).expect("Unable to connect to database");
 
+    // set session timezone to UTC to make sure that dates are stored in UTC timezone.
+    {
+        let mut tsx = connection.start_transaction(Default::default()).unwrap();
+        tsx.exec_drop("SET time_zone = '+00:00'", ()).unwrap();
+        tsx.commit().unwrap();
+    }
+
     let context = Context::new(connection);
 
     Rocket::build()
