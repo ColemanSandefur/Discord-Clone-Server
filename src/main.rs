@@ -201,6 +201,59 @@ impl Mutation {
 
         return None;
     }
+
+    #[graphql(description = "Change the content of a message")]
+    fn update_message(
+        context: &Context,
+        token: Uuid,
+        message_id: Uuid,
+        message: String,
+    ) -> Option<Message> {
+        let mut tsx = context
+            .get_conn()
+            .start_transaction(Default::default())
+            .unwrap();
+
+        let user_id: Option<Uuid> = tsx
+            .exec_first("SELECT user_id FROM sessions where id=?", (token,))
+            .unwrap();
+
+        if let Some(user_id) = user_id {
+            tsx.exec_drop(
+                "UPDATE messages SET message=? WHERE id=? AND user_id=?",
+                (message, message_id, user_id),
+            )
+            .unwrap();
+
+            let mut message = tsx
+                .exec_map(
+                    "call discord_clone.get_single_message(?, ?);",
+                    (token, message_id),
+                    |(id, message, user_id, channel_id, timestamp): (
+                        Uuid,
+                        String,
+                        Uuid,
+                        Uuid,
+                        NaiveDateTime,
+                    )| {
+                        let timestamp = DateTime::<Utc>::from_utc(timestamp, Utc);
+                        println!("{}", timestamp);
+                        return Message::new(id, message, user_id, channel_id, timestamp);
+                    },
+                )
+                .unwrap();
+
+            tsx.commit().unwrap();
+
+            if message.len() > 0 {
+                return Some(message.remove(0));
+            } else {
+                return None;
+            }
+        }
+
+        None
+    }
 }
 
 type Schema = juniper::RootNode<'static, Query, Mutation, EmptySubscription<Context>>;
