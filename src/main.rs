@@ -176,7 +176,7 @@ impl Mutation {
         token: Uuid,
         message: String,
         channel_id: Uuid,
-    ) -> Option<Uuid> {
+    ) -> Option<Message> {
         let mut tsx = context
             .get_conn()
             .start_transaction(Default::default())
@@ -184,19 +184,25 @@ impl Mutation {
 
         let message_id = Uuid::new_v4();
         let user_id: Option<Uuid> = tsx
-            .exec_first("SELECT user_id FROM sessions WHERE id=?", (token,))
+            .exec_first("SELECT sessions.user_id FROM sessions INNER JOIN channel_users ON channel_users.user_id=sessions.user_id WHERE sessions.id=?;", (token,))
             .unwrap();
 
         if let Some(user_id) = user_id {
             tsx.exec_drop(
                 "INSERT INTO messages (id, message, user_id, channel_id) VALUES (?, ?, ?, ?)",
-                (message_id, message, user_id, channel_id),
+                (message_id, &message, user_id, channel_id),
             )
             .unwrap();
 
             tsx.commit().unwrap();
 
-            return Some(message_id);
+            return Some(Message::new(
+                message_id,
+                message,
+                user_id,
+                channel_id,
+                Utc::now(),
+            ));
         }
 
         return None;
@@ -253,6 +259,37 @@ impl Mutation {
         }
 
         None
+    }
+
+    fn delete_message(context: &Context, token: Uuid, message_id: Uuid) -> Option<Uuid> {
+        let mut tsx = context
+            .get_conn()
+            .start_transaction(Default::default())
+            .unwrap();
+
+        let user_id: Option<Uuid> = tsx
+            .exec_first("SELECT user_id FROM sessions where id=?", (token,))
+            .unwrap();
+
+        if let Some(user_id) = user_id {
+            tsx.exec_drop(
+                "DELETE FROM messages WHERE id=? AND user_id=?",
+                (message_id, user_id),
+            )
+            .unwrap();
+            let result = tsx
+                .exec_first::<Uuid, _, _>("SELECT id FROM messages WHERE id=?", (message_id,))
+                .unwrap()
+                .is_none();
+            tsx.commit().unwrap();
+
+            return match result {
+                true => Some(message_id),
+                false => None,
+            };
+        }
+
+        return None;
     }
 }
 
