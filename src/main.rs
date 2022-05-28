@@ -246,12 +246,16 @@ impl Mutation {
             (message_id, user_id),
         )?;
 
+        // Should be 'None' if the message was removed
         let result =
             tsx.exec_first::<Uuid, _, _>("SELECT id FROM messages WHERE id=?", (message_id,))?;
 
         tsx.commit()?;
 
-        result.ok_or("Invalid permissions".into())
+        match result {
+            Some(_) => Err("Invalid permissions".into()),
+            None => Ok(message_id),
+        }
     }
 
     fn create_channel(
