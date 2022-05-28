@@ -5,7 +5,7 @@ use juniper::{EmptySubscription, FieldResult};
 use mysql::prelude::*;
 use mysql::{OptsBuilder, Pool};
 use rocket::{response::content, Rocket, State};
-use utils::get_user;
+use utils::get_user_res;
 use uuid::Uuid;
 
 mod gql_objects;
@@ -118,19 +118,24 @@ struct Mutation;
 #[graphql_object(Context=Context)]
 impl Mutation {
     #[graphql(description = "Create a user with username and password, returns user id")]
-    fn create_user(context: &Context, username: String, password: String) -> FieldResult<Uuid> {
-        let mut tsx = context
-            .get_conn()
-            .start_transaction(Default::default())
-            .unwrap();
+    fn create_user(
+        context: &Context,
+        username: String,
+        password: String,
+        password_confirm: String,
+    ) -> FieldResult<Uuid> {
+        let mut tsx = context.get_conn().start_transaction(Default::default())?;
 
-        let hash = bcrypt::hash(password, bcrypt::DEFAULT_COST).unwrap();
+        if password != password_confirm {
+            return Err("Passwords don't match".into());
+        }
+
+        let hash = bcrypt::hash(password, bcrypt::DEFAULT_COST)?;
         let uuid = Uuid::new_v4();
         tsx.exec_drop(
             "INSERT INTO users (id, username, password) VALUES (?, ?, ?)",
             (&uuid, username, hash),
-        )
-        .unwrap();
+        )?;
 
         tsx.commit()?;
 
@@ -138,38 +143,30 @@ impl Mutation {
     }
 
     #[graphql(description = "Sign in using username and password, returns the access token")]
-    fn sign_in(context: &Context, username: String, password: String) -> Option<Uuid> {
-        let mut tsx = context
-            .get_conn()
-            .start_transaction(Default::default())
-            .unwrap();
+    fn sign_in(context: &Context, username: String, password: String) -> FieldResult<Uuid> {
+        let mut tsx = context.get_conn().start_transaction(Default::default())?;
 
-        let user_pass_hash: Option<(Uuid, String)> = tsx
+        let user_pass_hash: (Uuid, String) = tsx
             .exec_first(
                 "SELECT id, password FROM users WHERE username=?",
                 (username,),
-            )
-            .unwrap();
+            )?
+            .ok_or("Invalid username or password")?;
 
-        if user_pass_hash.is_none() {
-            return None;
-        }
+        let (user_uuid, user_pass_hash) = user_pass_hash;
 
-        let (user_uuid, user_pass_hash) = user_pass_hash.unwrap();
-
-        if bcrypt::verify(password, &user_pass_hash).unwrap() {
+        if bcrypt::verify(password, &user_pass_hash)? {
             let token_uuid = Uuid::new_v4();
             tsx.exec_drop(
                 "INSERT INTO sessions (id, user_id) VALUES (?,?)",
                 (&token_uuid, &user_uuid),
-            )
-            .unwrap();
-            tsx.commit().unwrap();
+            )?;
+            tsx.commit()?;
 
-            return Some(token_uuid);
+            return Ok(token_uuid);
         }
 
-        return None;
+        return Err("Invalid username or password".into());
     }
 
     #[graphql(description = "Send a message to a specific channel, returns message id")]
@@ -178,36 +175,28 @@ impl Mutation {
         token: Uuid,
         message: String,
         channel_id: Uuid,
-    ) -> Option<Message> {
-        let mut tsx = context
-            .get_conn()
-            .start_transaction(Default::default())
-            .unwrap();
+    ) -> FieldResult<Message> {
+        let mut tsx = context.get_conn().start_transaction(Default::default())?;
 
         let message_id = Uuid::new_v4();
-        let user_id: Option<Uuid> = tsx
-            .exec_first("SELECT sessions.user_id FROM sessions INNER JOIN channel_users ON channel_users.user_id=sessions.user_id WHERE sessions.id=?;", (token,))
-            .unwrap();
+        let user_id: Uuid = tsx
+            .exec_first("SELECT sessions.user_id FROM sessions INNER JOIN channel_users ON channel_users.user_id=sessions.user_id WHERE sessions.id=?;", (token,))?
+            .ok_or("Invalid auth token or invalid channel permissions")?;
 
-        if let Some(user_id) = user_id {
-            tsx.exec_drop(
-                "INSERT INTO messages (id, message, user_id, channel_id) VALUES (?, ?, ?, ?)",
-                (message_id, &message, user_id, channel_id),
-            )
-            .unwrap();
+        tsx.exec_drop(
+            "INSERT INTO messages (id, message, user_id, channel_id) VALUES (?, ?, ?, ?)",
+            (message_id, &message, user_id, channel_id),
+        )?;
 
-            tsx.commit().unwrap();
+        tsx.commit()?;
 
-            return Some(Message::new(
-                message_id,
-                message,
-                user_id,
-                channel_id,
-                Utc::now(),
-            ));
-        }
-
-        return None;
+        return Ok(Message::new(
+            message_id,
+            message,
+            user_id,
+            channel_id,
+            Utc::now(),
+        ));
     }
 
     #[graphql(description = "Change the content of a message")]
@@ -216,108 +205,78 @@ impl Mutation {
         token: Uuid,
         message_id: Uuid,
         message: String,
-    ) -> Option<Message> {
-        let mut tsx = context
-            .get_conn()
-            .start_transaction(Default::default())
-            .unwrap();
+    ) -> FieldResult<Message> {
+        let mut tsx = context.get_conn().start_transaction(Default::default())?;
 
-        let user_id: Option<Uuid> = tsx
-            .exec_first("SELECT user_id FROM sessions where id=?", (token,))
-            .unwrap();
+        let user_id = get_user_res(&mut tsx, &token)?;
 
-        if let Some(user_id) = user_id {
-            tsx.exec_drop(
-                "UPDATE messages SET message=? WHERE id=? AND user_id=?",
-                (message, message_id, user_id),
-            )
-            .unwrap();
+        tsx.exec_drop(
+            "UPDATE messages SET message=? WHERE id=? AND user_id=?",
+            (message, message_id, user_id),
+        )?;
 
-            let mut message = tsx
-                .exec_map(
-                    "call discord_clone.get_single_message(?, ?);",
-                    (token, message_id),
-                    |(id, message, user_id, channel_id, timestamp): (
-                        Uuid,
-                        String,
-                        Uuid,
-                        Uuid,
-                        NaiveDateTime,
-                    )| {
-                        let timestamp = DateTime::<Utc>::from_utc(timestamp, Utc);
-                        println!("{}", timestamp);
-                        return Message::new(id, message, user_id, channel_id, timestamp);
-                    },
-                )
-                .unwrap();
+        let mut message = tsx.exec_map(
+            "call discord_clone.get_single_message(?, ?);",
+            (token, message_id),
+            |(id, message, user_id, channel_id, timestamp): (
+                Uuid,
+                String,
+                Uuid,
+                Uuid,
+                NaiveDateTime,
+            )| {
+                let timestamp = DateTime::<Utc>::from_utc(timestamp, Utc);
+                println!("{}", timestamp);
+                return Message::new(id, message, user_id, channel_id, timestamp);
+            },
+        )?;
 
-            tsx.commit().unwrap();
+        tsx.commit()?;
 
-            if message.len() > 0 {
-                return Some(message.remove(0));
-            } else {
-                return None;
-            }
-        }
-
-        None
+        message.pop().ok_or("Invalid permissions".into())
     }
 
-    fn delete_message(context: &Context, token: Uuid, message_id: Uuid) -> Option<Uuid> {
-        let mut tsx = context
-            .get_conn()
-            .start_transaction(Default::default())
-            .unwrap();
+    fn delete_message(context: &Context, token: Uuid, message_id: Uuid) -> FieldResult<Uuid> {
+        let mut tsx = context.get_conn().start_transaction(Default::default())?;
 
-        let user_id: Option<Uuid> = tsx
-            .exec_first("SELECT user_id FROM sessions where id=?", (token,))
-            .unwrap();
+        let user_id = get_user_res(&mut tsx, &token)?;
 
-        if let Some(user_id) = user_id {
-            tsx.exec_drop(
-                "DELETE FROM messages WHERE id=? AND user_id=?",
-                (message_id, user_id),
-            )
-            .unwrap();
-            let result = tsx
-                .exec_first::<Uuid, _, _>("SELECT id FROM messages WHERE id=?", (message_id,))
-                .unwrap()
-                .is_none();
-            tsx.commit().unwrap();
+        tsx.exec_drop(
+            "DELETE FROM messages WHERE id=? AND user_id=?",
+            (message_id, user_id),
+        )?;
 
-            return match result {
-                true => Some(message_id),
-                false => None,
-            };
-        }
+        let result =
+            tsx.exec_first::<Uuid, _, _>("SELECT id FROM messages WHERE id=?", (message_id,))?;
 
-        return None;
+        tsx.commit()?;
+
+        result.ok_or("Invalid permissions".into())
     }
 
-    fn create_channel(context: &Context, token: Uuid, channel_name: String) -> Option<Channel> {
-        let mut tsx = context
-            .get_conn()
-            .start_transaction(Default::default())
-            .ok()?;
+    fn create_channel(
+        context: &Context,
+        token: Uuid,
+        channel_name: String,
+    ) -> FieldResult<Channel> {
+        let mut tsx = context.get_conn().start_transaction(Default::default())?;
 
-        let user_id = get_user(&mut tsx, &token)?;
+        let user_id = get_user_res(&mut tsx, &token)?;
 
         let channel_id = Uuid::new_v4();
         tsx.exec_drop(
             "INSERT INTO channels (id, name) VALUES (?, ?);",
             (&channel_id, &channel_name),
-        )
-        .ok()?;
+        )?;
 
         tsx.exec_drop(
             "INSERT INTO channel_users (channel_id, user_id) VALUES (?, ?);",
             (&channel_id, &user_id),
-        )
-        .ok()?;
+        )?;
 
-        tsx.commit().ok()?;
+        tsx.commit()?;
 
-        Some(Channel::new(channel_id, channel_name))
+        Ok(Channel::new(channel_id, channel_name))
     }
 }
 
@@ -334,7 +293,9 @@ async fn get_graphql_handler(
     request: juniper_rocket::GraphQLRequest,
     schema: &State<Schema>,
 ) -> juniper_rocket::GraphQLResponse {
-    request.execute(&*schema, &*context).await
+    request
+        .execute::<Context, _, _, _>(&*schema, &*context)
+        .await
 }
 
 #[rocket::post("/graphql", data = "<request>")]
@@ -343,7 +304,9 @@ async fn post_graphql_handler(
     request: juniper_rocket::GraphQLRequest,
     schema: &State<Schema>,
 ) -> juniper_rocket::GraphQLResponse {
-    request.execute(&*schema, &*context).await
+    request
+        .execute::<Context, _, _, _>(&*schema, &*context)
+        .await
 }
 
 fn get_opts() -> OptsBuilder {
