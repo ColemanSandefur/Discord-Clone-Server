@@ -5,9 +5,11 @@ use juniper::{EmptySubscription, FieldResult};
 use mysql::prelude::*;
 use mysql::{OptsBuilder, Pool};
 use rocket::{response::content, Rocket, State};
+use utils::get_user;
 use uuid::Uuid;
 
 mod gql_objects;
+mod utils;
 use gql_objects::Channel;
 use gql_objects::Message;
 
@@ -34,7 +36,7 @@ struct Query;
 
 #[graphql_object(Context = Context)]
 impl Query {
-    fn apiVersion() -> &'static str {
+    fn api_version() -> &'static str {
         "0.1"
     }
 
@@ -290,6 +292,32 @@ impl Mutation {
         }
 
         return None;
+    }
+
+    fn create_channel(context: &Context, token: Uuid, channel_name: String) -> Option<Channel> {
+        let mut tsx = context
+            .get_conn()
+            .start_transaction(Default::default())
+            .ok()?;
+
+        let user_id = get_user(&mut tsx, &token)?;
+
+        let channel_id = Uuid::new_v4();
+        tsx.exec_drop(
+            "INSERT INTO channels (id, name) VALUES (?, ?);",
+            (&channel_id, &channel_name),
+        )
+        .ok()?;
+
+        tsx.exec_drop(
+            "INSERT INTO channel_users (channel_id, user_id) VALUES (?, ?);",
+            (&channel_id, &user_id),
+        )
+        .ok()?;
+
+        tsx.commit().ok()?;
+
+        Some(Channel::new(channel_id, channel_name))
     }
 }
 
