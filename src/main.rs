@@ -1,5 +1,7 @@
 #[macro_use]
 extern crate juniper;
+use std::path::Path;
+
 use chrono::{DateTime, NaiveDateTime, Utc};
 use juniper::{EmptySubscription, FieldResult};
 use mysql::prelude::*;
@@ -337,7 +339,7 @@ async fn main() {
 
     let context = Context::new(connection);
 
-    Rocket::build()
+    let rocket = Rocket::build()
         .manage(context)
         .manage(Schema::new(
             Query,
@@ -347,10 +349,14 @@ async fn main() {
         .mount(
             "/",
             rocket::routes![graphiql, get_graphql_handler, post_graphql_handler],
-        )
+        );
+
+    let rocket = if Path::new("../discord-client/build").exists() {
         // a quick workaround for cors while developing the server
-        .mount("/", FileServer::from("../discord-client/build"))
-        .launch()
-        .await
-        .expect("server to launch");
+        rocket.mount("/", FileServer::from("../discord-client/build"))
+    } else {
+        rocket
+    };
+
+    rocket.launch().await.expect("server to launch");
 }
